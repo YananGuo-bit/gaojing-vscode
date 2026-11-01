@@ -1,0 +1,47 @@
+{
+  "name": "gaojing",
+  "displayName": "稿镜 Manuscript Mirror",
+  "description": "对照经典范文与专业领域范文，在编辑器里直接诊断地理学科技论文写作片段。",
+  "version": "0.1.0",
+  "publisher": "YuxiaoKong",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YananGuo-bit/gaojing-vscode.git"
+  },
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "gaojing.diagnose",
+        "title": "稿镜: 诊断选中文本",
+        "category": "稿镜"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "gaojing.diagnose",
+          "when": "editorHasSelection",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node",
+    "watch": "npm run compile -- --watch"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.21.0",
+    "typescript": "^5.4.0"
+  }
+}
