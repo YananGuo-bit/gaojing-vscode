@@ -2,12 +2,14 @@
   "name": "gaojing",
   "displayName": "稿镜 Manuscript Mirror",
   "description": "对照经典范文与专业领域范文，在编辑器里直接诊断地理学科技论文写作片段。",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "YuxiaoKong",
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other"],
+  "categories": [
+    "Other"
+  ],
   "icon": "media/icon.png",
   "license": "MIT",
   "repository": {
