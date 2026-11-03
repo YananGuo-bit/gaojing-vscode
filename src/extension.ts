@@ -15,21 +15,25 @@ const ERROR_COPY: Record<string, string> = {
   invalid_json: 'AI 返回内容解析失败，请重试一次。',
   server_not_configured: '服务端尚未配置模型密钥，请联系管理员。',
   not_authenticated: '请先登录后再试。',
-  invalid_request: '请求内容不符合要求，请检查选中文本。',
+  invalid_request: '请求内容不符合要求，请检查输入文本。',
   upstream_unreachable: '无法连接到模型服务，请稍后重试。',
   upstream_error: '模型服务暂时出错，请稍后重试。',
 };
 
 export function activate(context: vscode.ExtensionContext) {
-  context.subscriptions.push(vscode.commands.registerCommand('gaojing.diagnose', runDiagnose));
+  context.subscriptions.push(
+    vscode.commands.registerCommand('gaojing.open', () => openInputPanel(context)),
+    vscode.commands.registerCommand('gaojing.diagnose', () => diagnoseSelection(context)),
+  );
 }
 
 export function deactivate() {}
 
-async function runDiagnose() {
+// 旧入口：对编辑器里已选中的文字直接诊断（适合已经在 Markdown 草稿里写好的情况）
+async function diagnoseSelection(context: vscode.ExtensionContext) {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
-    vscode.window.showErrorMessage('稿镜：请先打开一个文件。');
+    vscode.window.showErrorMessage('稿镜：请先打开一个文件并选中文字，或改用「稿镜: 打开诊断面板」。');
     return;
   }
   const text = editor.document.getText(editor.selection).trim();
@@ -37,15 +41,25 @@ async function runDiagnose() {
     vscode.window.showWarningMessage('稿镜：请先选中至少 20 个字符的稿件文本。');
     return;
   }
-
-  const discipline = DISCIPLINES[0].value;
-
   const sectionPick = await vscode.window.showQuickPick(
     SECTIONS.map((s) => ({ label: s.label, key: s.key })),
     { placeHolder: '这段文字属于哪种文段类型？' },
   );
   if (!sectionPick) return;
 
+  const targetJournal = await pickJournal();
+  if (targetJournal === undefined) return;
+
+  const result = await callDiagnoseApi(DISCIPLINES[0].value, targetJournal, sectionPick.key, text);
+  if (result.ok) {
+    showResultPanel(context, getSection(sectionPick.key).label, result.data);
+  } else {
+    vscode.window.showErrorMessage(`稿镜：${result.message}`);
+  }
+}
+
+async function pickJournal(): Promise<string | undefined> {
+  const discipline = DISCIPLINES[0].value;
   const journalItems: vscode.QuickPickItem[] = [
     { label: '不限定', detail: '按学科通行标准评判' },
     ...(TARGET_JOURNALS[discipline] ?? []).map((j) => ({ label: j })),
@@ -54,36 +68,162 @@ async function runDiagnose() {
   const journalPick = await vscode.window.showQuickPick(journalItems, {
     placeHolder: '对标哪本目标期刊？（可不选）',
   });
-  if (journalPick === undefined) return;
-
-  let targetJournal = '';
+  if (journalPick === undefined) return undefined;
   if (journalPick.label === '其他（手动输入）') {
-    targetJournal = (await vscode.window.showInputBox({ prompt: '输入目标期刊名称' })) ?? '';
-  } else if (journalPick.label !== '不限定') {
-    targetJournal = journalPick.label;
+    return (await vscode.window.showInputBox({ prompt: '输入目标期刊名称' })) ?? '';
   }
+  if (journalPick.label === '不限定') return '';
+  return journalPick.label;
+}
 
-  await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: '稿镜：AI 正在生成诊断…', cancellable: false },
-    async () => {
-      try {
-        const res = await fetch(`${API_BASE}/api/diagnose`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ discipline, tier: targetJournal, section: sectionPick.key, text }),
-        });
-        const data = (await res.json()) as Diagnosis & { error?: string };
-        if (!res.ok) {
-          const msg = ERROR_COPY[data?.error ?? ''] ?? `诊断请求失败（${data?.error ?? '未知错误'}），请重试。`;
-          vscode.window.showErrorMessage(`稿镜：${msg}`);
-          return;
-        }
-        showResultPanel(getSection(sectionPick.key).label, text, data as Diagnosis);
-      } catch {
-        vscode.window.showErrorMessage('稿镜：网络请求失败，请检查网络后重试。');
-      }
-    },
-  );
+async function callDiagnoseApi(
+  discipline: string,
+  tier: string,
+  section: string,
+  text: string,
+): Promise<{ ok: true; data: Diagnosis } | { ok: false; message: string }> {
+  try {
+    const res = await fetch(`${API_BASE}/api/diagnose`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ discipline, tier, section, text }),
+    });
+    const data = (await res.json()) as Diagnosis & { error?: string };
+    if (!res.ok) {
+      return { ok: false, message: ERROR_COPY[data?.error ?? ''] ?? `诊断请求失败（${data?.error ?? '未知错误'}），请重试。` };
+    }
+    return { ok: true, data: data as Diagnosis };
+  } catch {
+    return { ok: false, message: '网络请求失败，请检查网络后重试。' };
+  }
+}
+
+// 新入口：一个独立的输入面板，自带可换行的文本框，不依赖编辑器的 word wrap 设置
+function openInputPanel(context: vscode.ExtensionContext) {
+  const panel = vscode.window.createWebviewPanel('gaojingInput', '稿镜：诊断面板', vscode.ViewColumn.Active, {
+    enableScripts: true,
+    retainContextWhenHidden: true,
+  });
+
+  const sectionOptions = SECTIONS.map((s) => `<option value="${s.key}">${esc(s.label)}</option>`).join('');
+  const journalOptions = [
+    '<option value="">不限定（按学科通行标准）</option>',
+    ...(TARGET_JOURNALS[DISCIPLINES[0].value] ?? []).map((j) => `<option value="${esc(j)}">${esc(j)}</option>`),
+    '<option value="__custom__">其他（手动输入）</option>',
+  ].join('');
+
+  panel.webview.html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  body { font-family: -apple-system, 'Segoe UI', sans-serif; padding: 20px; color: var(--vscode-foreground); line-height: 1.6; max-width: 760px; }
+  h2 { font-size: 16px; margin-bottom: 4px; }
+  .hint { font-size: 12px; opacity: 0.7; margin-bottom: 16px; }
+  label { display: block; font-size: 12px; opacity: 0.8; margin: 14px 0 4px; }
+  textarea, select, input[type="text"] {
+    width: 100%; box-sizing: border-box; font-family: inherit; font-size: 13.5px;
+    background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, var(--vscode-widget-border)); border-radius: 4px; padding: 8px 10px;
+  }
+  textarea { min-height: 220px; resize: vertical; white-space: pre-wrap; }
+  .row { display: flex; gap: 14px; }
+  .row > div { flex: 1; }
+  button { margin-top: 18px; padding: 9px 18px; font-size: 13.5px; font-weight: 600; border-radius: 4px; border: none;
+    background: var(--vscode-button-background); color: var(--vscode-button-foreground); cursor: pointer; }
+  button:hover { background: var(--vscode-button-hoverBackground); }
+  button:disabled { opacity: 0.6; cursor: not-allowed; }
+  #status { margin-top: 10px; font-size: 12.5px; opacity: 0.8; }
+  #result { margin-top: 26px; border-top: 1px solid var(--vscode-widget-border); padding-top: 18px; }
+  .verdict { background: var(--vscode-textBlockQuote-background); border-left: 3px solid var(--vscode-focusBorder); padding: 10px 13px; border-radius: 0 5px 5px 0; margin: 14px 0; }
+  .score-row { margin-bottom: 14px; }
+  .score-top { display: flex; justify-content: space-between; font-weight: 600; }
+  .score-track { height: 6px; border-radius: 3px; background: var(--vscode-widget-border); overflow: hidden; margin: 4px 0; }
+  .score-fill { height: 100%; }
+  .score-comment { font-size: 13px; opacity: 0.85; }
+  .comment-card { border-left: 3px solid var(--vscode-charts-orange); background: var(--vscode-textCodeBlock-background); border-radius: 0 6px 6px 0; padding: 10px 13px; margin-bottom: 10px; }
+  .comment-quote { font-style: italic; margin-bottom: 5px; }
+  .comment-issue { font-weight: 600; margin-bottom: 3px; }
+  .comment-practice { font-size: 13px; opacity: 0.9; }
+  .rewrite-box { background: var(--vscode-textCodeBlock-background); padding: 14px; border-radius: 6px; white-space: pre-line; }
+  h3 { font-size: 13px; margin: 20px 0 8px; opacity: 0.8; text-transform: uppercase; letter-spacing: 0.5px; }
+</style>
+</head>
+<body>
+  <h2>稿镜 · 科技论文写作诊断</h2>
+  <div class="hint">把稿件片段粘贴或直接打在下面，选好文段类型和目标期刊，点"开始诊断"。</div>
+
+  <label>稿件文本（建议 100–400 字）</label>
+  <textarea id="manuscript" placeholder="在此粘贴或输入你的论文段落……"></textarea>
+
+  <div class="row">
+    <div>
+      <label>文段类型</label>
+      <select id="section">${sectionOptions}</select>
+    </div>
+    <div>
+      <label>目标期刊</label>
+      <select id="journal">${journalOptions}</select>
+      <input type="text" id="journalCustom" placeholder="输入目标期刊名称" style="display:none; margin-top:6px;">
+    </div>
+  </div>
+
+  <button id="submitBtn">开始诊断</button>
+  <div id="status"></div>
+  <div id="result"></div>
+
+<script>
+  const vscodeApi = acquireVsCodeApi();
+  const journalSelect = document.getElementById('journal');
+  const journalCustom = document.getElementById('journalCustom');
+  journalSelect.addEventListener('change', () => {
+    journalCustom.style.display = journalSelect.value === '__custom__' ? 'block' : 'none';
+  });
+
+  const btn = document.getElementById('submitBtn');
+  const statusEl = document.getElementById('status');
+  const resultEl = document.getElementById('result');
+
+  btn.addEventListener('click', () => {
+    const text = document.getElementById('manuscript').value.trim();
+    if (text.length < 20) {
+      statusEl.textContent = '请先输入至少 20 个字符的稿件文本。';
+      return;
+    }
+    const section = document.getElementById('section').value;
+    let journal = journalSelect.value;
+    if (journal === '__custom__') journal = journalCustom.value.trim();
+    btn.disabled = true;
+    statusEl.textContent = 'AI 正在生成诊断…（通常需要 10–40 秒）';
+    resultEl.innerHTML = '';
+    vscodeApi.postMessage({ command: 'diagnose', text, section, journal });
+  });
+
+  window.addEventListener('message', (event) => {
+    const msg = event.data;
+    btn.disabled = false;
+    if (msg.command === 'error') {
+      statusEl.textContent = msg.message;
+      return;
+    }
+    if (msg.command === 'result') {
+      statusEl.textContent = '';
+      resultEl.innerHTML = msg.html;
+    }
+  });
+</script>
+</body>
+</html>`;
+
+  panel.webview.onDidReceiveMessage(async (msg) => {
+    if (msg.command !== 'diagnose') return;
+    const result = await callDiagnoseApi(DISCIPLINES[0].value, msg.journal ?? '', msg.section, msg.text);
+    if (!result.ok) {
+      panel.webview.postMessage({ command: 'error', message: result.message });
+      return;
+    }
+    panel.webview.postMessage({ command: 'result', html: renderResultHtml(result.data) });
+  });
 }
 
 function scoreColor(v: number): string {
@@ -96,17 +236,13 @@ function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function showResultPanel(sectionLabel: string, originalText: string, d: Diagnosis) {
-  const panel = vscode.window.createWebviewPanel('gaojingResult', `稿镜诊断 · ${sectionLabel}`, vscode.ViewColumn.Beside, {
-    enableScripts: false,
-  });
-
+function renderResultHtml(d: Diagnosis): string {
   const scoresHtml = Object.entries(d.scores ?? {})
     .map(([key, s]) => {
       const color = scoreColor(s.score);
       return `
         <div class="score-row">
-          <div class="score-top"><span class="score-name">${esc(key)}</span><span class="score-num" style="color:${color}">${s.score}</span></div>
+          <div class="score-top"><span>${esc(key)}</span><span style="color:${color}">${s.score}</span></div>
           <div class="score-track"><div class="score-fill" style="width:${Math.max(0, Math.min(100, s.score))}%;background:${color}"></div></div>
           <div class="score-comment">${esc(s.comment)}</div>
         </div>`;
@@ -124,6 +260,22 @@ function showResultPanel(sectionLabel: string, originalText: string, d: Diagnosi
     )
     .join('');
 
+  return `
+    <div class="verdict">${esc(d.tier_verdict ?? '')}</div>
+    <h3>评分</h3>
+    ${scoresHtml}
+    <h3>逐句批注</h3>
+    ${commentsHtml}
+    <h3>对照示范</h3>
+    <div class="rewrite-box">${esc(d.rewrite ?? '')}</div>
+  `;
+}
+
+// 旧的独立结果面板，仍供「诊断选中文本」命令使用
+function showResultPanel(context: vscode.ExtensionContext, sectionLabel: string, d: Diagnosis) {
+  const panel = vscode.window.createWebviewPanel('gaojingResult', `稿镜诊断 · ${sectionLabel}`, vscode.ViewColumn.Beside, {
+    enableScripts: false,
+  });
   panel.webview.html = `<!DOCTYPE html>
 <html>
 <head>
@@ -147,13 +299,7 @@ function showResultPanel(sectionLabel: string, originalText: string, d: Diagnosi
 </head>
 <body>
   <h2>稿镜诊断结果 · ${esc(sectionLabel)}</h2>
-  <div class="verdict">${esc(d.tier_verdict ?? '')}</div>
-  <h3>评分</h3>
-  ${scoresHtml}
-  <h3>逐句批注</h3>
-  ${commentsHtml}
-  <h3>对照示范</h3>
-  <div class="rewrite-box">${esc(d.rewrite ?? '')}</div>
+  ${renderResultHtml(d)}
 </body>
 </html>`;
 }
