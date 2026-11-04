@@ -106,15 +106,45 @@ async function callDiagnoseApi(
   }
 }
 
-// 侧边栏常驻入口
+// 侧边栏常驻入口：只是个精简的启动器，真正的输入/结果在右侧主区域的宽面板里打开
 class GaojingViewProvider implements vscode.WebviewViewProvider {
   constructor(private readonly context: vscode.ExtensionContext) {}
 
   resolveWebviewView(webviewView: vscode.WebviewView) {
     webviewView.webview.options = { enableScripts: true };
-    webviewView.webview.html = getInputPanelHtml();
-    wireMessages(webviewView.webview);
+    webviewView.webview.html = getLauncherHtml();
+    webviewView.webview.onDidReceiveMessage((msg) => {
+      if (msg.command === 'openPanel') {
+        vscode.commands.executeCommand('gaojing.open');
+      }
+    });
   }
+}
+
+function getLauncherHtml(): string {
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  body { font-family: -apple-system, 'Segoe UI', sans-serif; padding: 16px 14px; color: var(--vscode-foreground); line-height: 1.6; text-align: center; }
+  .hint { font-size: 12px; opacity: 0.75; margin: 10px 0 16px; }
+  button { padding: 9px 14px; font-size: 13px; font-weight: 600; border-radius: 4px; border: none;
+    background: var(--vscode-button-background); color: var(--vscode-button-foreground); cursor: pointer; width: 100%; }
+  button:hover { background: var(--vscode-button-hoverBackground); }
+</style>
+</head>
+<body>
+  <div class="hint">点击在右侧打开完整的诊断面板</div>
+  <button id="openBtn">打开诊断面板 →</button>
+<script>
+  const vscodeApi = acquireVsCodeApi();
+  document.getElementById('openBtn').addEventListener('click', () => {
+    vscodeApi.postMessage({ command: 'openPanel' });
+  });
+</script>
+</body>
+</html>`;
 }
 
 // 新入口（独立编辑器标签页版本，空间更大）：自带可换行的文本框，不依赖编辑器的 word wrap 设置
