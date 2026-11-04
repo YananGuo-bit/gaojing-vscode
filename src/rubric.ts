@@ -1,7 +1,14 @@
 // Mirrors gaojing/lib/rubric.ts (the web app). Keep the picker options here in sync
 // with that file by hand — this extension has no build-time link to the web repo.
 
-export const DISCIPLINES = [{ value: '地理科学', label: '地理科学（试点）' }];
+export const DISCIPLINES = [
+  { value: '地理科学', label: '地理科学（试点）', enabled: true },
+  { value: '环境科学', label: '环境科学（即将开放）', enabled: false },
+  { value: '生物学', label: '生物学（即将开放）', enabled: false },
+  { value: '化学', label: '化学（即将开放）', enabled: false },
+  { value: '材料科学', label: '材料科学（即将开放）', enabled: false },
+  { value: '医学与生命科学', label: '医学与生命科学（即将开放）', enabled: false },
+];
 
 export const TARGET_JOURNALS: Record<string, string[]> = {
   地理科学: [

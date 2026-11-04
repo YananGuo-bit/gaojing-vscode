@@ -2,7 +2,7 @@
   "name": "gaojing",
   "displayName": "稿镜 Manuscript Mirror",
   "description": "对照经典范文与专业领域范文，在编辑器里直接诊断地理学科技论文写作片段。",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "publisher": "YuxiaoKong",
   "engines": {
     "vscode": "^1.85.0"
@@ -37,6 +37,24 @@
           "command": "gaojing.diagnose",
           "when": "editorHasSelection",
           "group": "navigation"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "gaojing",
+          "title": "稿镜",
+          "icon": "media/activitybar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "gaojing": [
+        {
+          "type": "webview",
+          "id": "gaojing.sidebarView",
+          "name": "诊断面板"
         }
       ]
     }

@@ -21,7 +21,9 @@ const ERROR_COPY: Record<string, string> = {
 };
 
 export function activate(context: vscode.ExtensionContext) {
+  const sidebarProvider = new GaojingViewProvider(context);
   context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider('gaojing.sidebarView', sidebarProvider),
     vscode.commands.registerCommand('gaojing.open', () => openInputPanel(context)),
     vscode.commands.registerCommand('gaojing.diagnose', () => diagnoseSelection(context)),
   );
@@ -41,25 +43,31 @@ async function diagnoseSelection(context: vscode.ExtensionContext) {
     vscode.window.showWarningMessage('稿镜：请先选中至少 20 个字符的稿件文本。');
     return;
   }
+
+  const disciplinePick = await vscode.window.showQuickPick(
+    DISCIPLINES.filter((d) => d.enabled).map((d) => ({ label: d.label, value: d.value })),
+    { placeHolder: '学科方向' },
+  );
+  if (!disciplinePick) return;
+
   const sectionPick = await vscode.window.showQuickPick(
     SECTIONS.map((s) => ({ label: s.label, key: s.key })),
     { placeHolder: '这段文字属于哪种文段类型？' },
   );
   if (!sectionPick) return;
 
-  const targetJournal = await pickJournal();
+  const targetJournal = await pickJournal(disciplinePick.value);
   if (targetJournal === undefined) return;
 
-  const result = await callDiagnoseApi(DISCIPLINES[0].value, targetJournal, sectionPick.key, text);
+  const result = await callDiagnoseApi(disciplinePick.value, targetJournal, sectionPick.key, text);
   if (result.ok) {
-    showResultPanel(context, getSection(sectionPick.key).label, result.data);
+    showResultPanel(getSection(sectionPick.key).label, result.data);
   } else {
     vscode.window.showErrorMessage(`稿镜：${result.message}`);
   }
 }
 
-async function pickJournal(): Promise<string | undefined> {
-  const discipline = DISCIPLINES[0].value;
+async function pickJournal(discipline: string): Promise<string | undefined> {
   const journalItems: vscode.QuickPickItem[] = [
     { label: '不限定', detail: '按学科通行标准评判' },
     ...(TARGET_JOURNALS[discipline] ?? []).map((j) => ({ label: j })),
@@ -98,75 +106,95 @@ async function callDiagnoseApi(
   }
 }
 
-// 新入口：一个独立的输入面板，自带可换行的文本框，不依赖编辑器的 word wrap 设置
+// 侧边栏常驻入口
+class GaojingViewProvider implements vscode.WebviewViewProvider {
+  constructor(private readonly context: vscode.ExtensionContext) {}
+
+  resolveWebviewView(webviewView: vscode.WebviewView) {
+    webviewView.webview.options = { enableScripts: true };
+    webviewView.webview.html = getInputPanelHtml();
+    wireMessages(webviewView.webview);
+  }
+}
+
+// 新入口（独立编辑器标签页版本，空间更大）：自带可换行的文本框，不依赖编辑器的 word wrap 设置
 function openInputPanel(context: vscode.ExtensionContext) {
   const panel = vscode.window.createWebviewPanel('gaojingInput', '稿镜：诊断面板', vscode.ViewColumn.Active, {
     enableScripts: true,
     retainContextWhenHidden: true,
   });
+  panel.webview.html = getInputPanelHtml();
+  wireMessages(panel.webview);
+}
 
-  const sectionOptions = SECTIONS.map((s) => `<option value="${s.key}">${esc(s.label)}</option>`).join('');
-  const journalOptions = [
-    '<option value="">不限定（按学科通行标准）</option>',
-    ...(TARGET_JOURNALS[DISCIPLINES[0].value] ?? []).map((j) => `<option value="${esc(j)}">${esc(j)}</option>`),
-    '<option value="__custom__">其他（手动输入）</option>',
-  ].join('');
+function wireMessages(webview: vscode.Webview) {
+  webview.onDidReceiveMessage(async (msg) => {
+    if (msg.command !== 'diagnose') return;
+    const result = await callDiagnoseApi(msg.discipline, msg.journal ?? '', msg.section, msg.text);
+    if (!result.ok) {
+      webview.postMessage({ command: 'error', message: result.message });
+      return;
+    }
+    webview.postMessage({ command: 'result', html: renderResultHtml(result.data) });
+  });
+}
 
-  panel.webview.html = `<!DOCTYPE html>
+function getInputPanelHtml(): string {
+  const disciplineOptions = DISCIPLINES.map(
+    (d) => `<option value="${esc(d.value)}" ${d.enabled ? '' : 'disabled'}>${esc(d.label)}</option>`,
+  ).join('');
+
+  return `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
 <style>
-  body { font-family: -apple-system, 'Segoe UI', sans-serif; padding: 20px; color: var(--vscode-foreground); line-height: 1.6; max-width: 760px; }
-  h2 { font-size: 16px; margin-bottom: 4px; }
-  .hint { font-size: 12px; opacity: 0.7; margin-bottom: 16px; }
-  label { display: block; font-size: 12px; opacity: 0.8; margin: 14px 0 4px; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif; padding: 16px; color: var(--vscode-foreground); line-height: 1.6; }
+  h2 { font-size: 15px; margin-bottom: 4px; }
+  .hint { font-size: 11.5px; opacity: 0.7; margin-bottom: 14px; }
+  label { display: block; font-size: 11.5px; opacity: 0.8; margin: 12px 0 4px; }
   textarea, select, input[type="text"] {
-    width: 100%; box-sizing: border-box; font-family: inherit; font-size: 13.5px;
+    width: 100%; box-sizing: border-box; font-family: inherit; font-size: 13px;
     background: var(--vscode-input-background); color: var(--vscode-input-foreground);
-    border: 1px solid var(--vscode-input-border, var(--vscode-widget-border)); border-radius: 4px; padding: 8px 10px;
+    border: 1px solid var(--vscode-input-border, var(--vscode-widget-border)); border-radius: 4px; padding: 7px 9px;
   }
-  textarea { min-height: 220px; resize: vertical; white-space: pre-wrap; }
-  .row { display: flex; gap: 14px; }
-  .row > div { flex: 1; }
-  button { margin-top: 18px; padding: 9px 18px; font-size: 13.5px; font-weight: 600; border-radius: 4px; border: none;
-    background: var(--vscode-button-background); color: var(--vscode-button-foreground); cursor: pointer; }
+  textarea { min-height: 180px; resize: vertical; white-space: pre-wrap; }
+  button { margin-top: 16px; padding: 8px 16px; font-size: 13px; font-weight: 600; border-radius: 4px; border: none;
+    background: var(--vscode-button-background); color: var(--vscode-button-foreground); cursor: pointer; width: 100%; }
   button:hover { background: var(--vscode-button-hoverBackground); }
   button:disabled { opacity: 0.6; cursor: not-allowed; }
-  #status { margin-top: 10px; font-size: 12.5px; opacity: 0.8; }
-  #result { margin-top: 26px; border-top: 1px solid var(--vscode-widget-border); padding-top: 18px; }
-  .verdict { background: var(--vscode-textBlockQuote-background); border-left: 3px solid var(--vscode-focusBorder); padding: 10px 13px; border-radius: 0 5px 5px 0; margin: 14px 0; }
-  .score-row { margin-bottom: 14px; }
-  .score-top { display: flex; justify-content: space-between; font-weight: 600; }
+  #status { margin-top: 10px; font-size: 12px; opacity: 0.8; }
+  #result { margin-top: 22px; border-top: 1px solid var(--vscode-widget-border); padding-top: 16px; }
+  .verdict { background: var(--vscode-textBlockQuote-background); border-left: 3px solid var(--vscode-focusBorder); padding: 9px 12px; border-radius: 0 5px 5px 0; margin: 12px 0; font-size: 13px; }
+  .score-row { margin-bottom: 12px; }
+  .score-top { display: flex; justify-content: space-between; font-weight: 600; font-size: 13px; }
   .score-track { height: 6px; border-radius: 3px; background: var(--vscode-widget-border); overflow: hidden; margin: 4px 0; }
   .score-fill { height: 100%; }
-  .score-comment { font-size: 13px; opacity: 0.85; }
-  .comment-card { border-left: 3px solid var(--vscode-charts-orange); background: var(--vscode-textCodeBlock-background); border-radius: 0 6px 6px 0; padding: 10px 13px; margin-bottom: 10px; }
-  .comment-quote { font-style: italic; margin-bottom: 5px; }
+  .score-comment { font-size: 12px; opacity: 0.85; }
+  .comment-card { border-left: 3px solid var(--vscode-charts-orange); background: var(--vscode-textCodeBlock-background); border-radius: 0 6px 6px 0; padding: 9px 12px; margin-bottom: 9px; font-size: 12.5px; }
+  .comment-quote { font-style: italic; margin-bottom: 4px; }
   .comment-issue { font-weight: 600; margin-bottom: 3px; }
-  .comment-practice { font-size: 13px; opacity: 0.9; }
-  .rewrite-box { background: var(--vscode-textCodeBlock-background); padding: 14px; border-radius: 6px; white-space: pre-line; }
-  h3 { font-size: 13px; margin: 20px 0 8px; opacity: 0.8; text-transform: uppercase; letter-spacing: 0.5px; }
+  .comment-practice { opacity: 0.9; }
+  .rewrite-box { background: var(--vscode-textCodeBlock-background); padding: 12px; border-radius: 6px; white-space: pre-line; font-size: 12.5px; }
+  h3 { font-size: 11.5px; margin: 18px 0 7px; opacity: 0.8; text-transform: uppercase; letter-spacing: 0.5px; }
 </style>
 </head>
 <body>
-  <h2>稿镜 · 科技论文写作诊断</h2>
-  <div class="hint">把稿件片段粘贴或直接打在下面，选好文段类型和目标期刊，点"开始诊断"。</div>
+  <h2>稿镜 · 写作诊断</h2>
+  <div class="hint">把稿件片段粘贴或直接打在下面，选好学科、文段类型和目标期刊，点"开始诊断"。</div>
+
+  <label>学科方向</label>
+  <select id="discipline">${disciplineOptions}</select>
 
   <label>稿件文本（建议 100–400 字）</label>
   <textarea id="manuscript" placeholder="在此粘贴或输入你的论文段落……"></textarea>
 
-  <div class="row">
-    <div>
-      <label>文段类型</label>
-      <select id="section">${sectionOptions}</select>
-    </div>
-    <div>
-      <label>目标期刊</label>
-      <select id="journal">${journalOptions}</select>
-      <input type="text" id="journalCustom" placeholder="输入目标期刊名称" style="display:none; margin-top:6px;">
-    </div>
-  </div>
+  <label>文段类型</label>
+  <select id="section">${SECTIONS.map((s) => `<option value="${s.key}">${esc(s.label)}</option>`).join('')}</select>
+
+  <label>目标期刊</label>
+  <select id="journal"></select>
+  <input type="text" id="journalCustom" placeholder="输入目标期刊名称" style="display:none; margin-top:6px;">
 
   <button id="submitBtn">开始诊断</button>
   <div id="status"></div>
@@ -174,8 +202,22 @@ function openInputPanel(context: vscode.ExtensionContext) {
 
 <script>
   const vscodeApi = acquireVsCodeApi();
+  const TARGET_JOURNALS = ${JSON.stringify(TARGET_JOURNALS)};
+
+  const disciplineSelect = document.getElementById('discipline');
   const journalSelect = document.getElementById('journal');
   const journalCustom = document.getElementById('journalCustom');
+
+  function refreshJournals() {
+    const list = TARGET_JOURNALS[disciplineSelect.value] || [];
+    journalSelect.innerHTML = '<option value="">不限定（按学科通行标准）</option>'
+      + list.map(j => '<option value="' + j.replace(/"/g,'&quot;') + '">' + j + '</option>').join('')
+      + '<option value="__custom__">其他（手动输入）</option>';
+    journalCustom.style.display = 'none';
+  }
+  disciplineSelect.addEventListener('change', refreshJournals);
+  refreshJournals();
+
   journalSelect.addEventListener('change', () => {
     journalCustom.style.display = journalSelect.value === '__custom__' ? 'block' : 'none';
   });
@@ -190,13 +232,14 @@ function openInputPanel(context: vscode.ExtensionContext) {
       statusEl.textContent = '请先输入至少 20 个字符的稿件文本。';
       return;
     }
+    const discipline = disciplineSelect.value;
     const section = document.getElementById('section').value;
     let journal = journalSelect.value;
     if (journal === '__custom__') journal = journalCustom.value.trim();
     btn.disabled = true;
     statusEl.textContent = 'AI 正在生成诊断…（通常需要 10–40 秒）';
     resultEl.innerHTML = '';
-    vscodeApi.postMessage({ command: 'diagnose', text, section, journal });
+    vscodeApi.postMessage({ command: 'diagnose', discipline, text, section, journal });
   });
 
   window.addEventListener('message', (event) => {
@@ -214,16 +257,6 @@ function openInputPanel(context: vscode.ExtensionContext) {
 </script>
 </body>
 </html>`;
-
-  panel.webview.onDidReceiveMessage(async (msg) => {
-    if (msg.command !== 'diagnose') return;
-    const result = await callDiagnoseApi(DISCIPLINES[0].value, msg.journal ?? '', msg.section, msg.text);
-    if (!result.ok) {
-      panel.webview.postMessage({ command: 'error', message: result.message });
-      return;
-    }
-    panel.webview.postMessage({ command: 'result', html: renderResultHtml(result.data) });
-  });
 }
 
 function scoreColor(v: number): string {
@@ -272,7 +305,7 @@ function renderResultHtml(d: Diagnosis): string {
 }
 
 // 旧的独立结果面板，仍供「诊断选中文本」命令使用
-function showResultPanel(context: vscode.ExtensionContext, sectionLabel: string, d: Diagnosis) {
+function showResultPanel(sectionLabel: string, d: Diagnosis) {
   const panel = vscode.window.createWebviewPanel('gaojingResult', `稿镜诊断 · ${sectionLabel}`, vscode.ViewColumn.Beside, {
     enableScripts: false,
   });
